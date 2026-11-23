@@ -63,6 +63,7 @@ STATE_FILENAME = "gpu-server.json"
 LOG_FILENAME = "gpu-server.log"
 COMFY_LOG_FILENAME = "comfyui.log"
 TOKEN_BYTES = 24  # 32 characters of base64url
+PAIRING_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")  # what remote.TOKEN_RE accepts
 MAX_UPLOAD_MB = 256  # an 8K RGBA PNG is well below this
 MAX_BODY = 32 * 1024 * 1024  # workflow graphs and the other JSON requests
 MAX_OWN_BODY = 64 * 1024  # the GPU server's own requests
@@ -150,9 +151,11 @@ def write_state(home: Path, state: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def new_pairing(home: Path) -> str:
-    """Make a new pairing code (the old one stops working); returns it. Only its hash is kept."""
-    token = secrets.token_urlsafe(TOKEN_BYTES)
+def new_pairing(home: Path, token: str | None = None) -> str:
+    """Make a new pairing code, or adopt ``token`` (the old one stops working); returns it.
+    Only its hash is kept."""
+    if token is None:
+        token = secrets.token_urlsafe(TOKEN_BYTES)
     state = read_state(home)
     state.update({"token_sha256": token_digest(token), "paired": time.strftime("%Y-%m-%d %H:%M:%S")})
     write_state(home, state)
@@ -1079,6 +1082,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--bind", help="the address to listen on (default: this computer's Tailscale address)")
     s.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"the port to listen on (default {DEFAULT_PORT})")
     s.add_argument("--max-upload-mb", type=int, default=MAX_UPLOAD_MB, help="largest image upload")
+    s.add_argument(
+        "--pairing-code",
+        type=_pairing_code_arg,
+        help="use this pairing code instead of the saved one (replaces it; the old one stops working)",
+    )
     pr = sub.add_parser("pair", help="make a new pairing code (the old one stops working at once)")
     pr.add_argument("--bind", help="the address OpenFill connects to (shown in the code)")
     pr.add_argument("--port", type=int, default=DEFAULT_PORT, help="the port the server listens on")
@@ -1109,6 +1117,14 @@ def main(argv: list[str] | None = None) -> int:
     return serve(args, home)
 
 
+def _pairing_code_arg(value: str) -> str:
+    """A pairing code OpenFill accepts: 16 to 128 letters, digits, '-' or '_'."""
+    code = value.strip()
+    if not PAIRING_CODE_RE.match(code):
+        raise argparse.ArgumentTypeError("use 16 to 128 letters, digits, '-' or '_' (what OpenFill accepts)")
+    return code
+
+
 def _pairing_banner(line: str) -> str:
     return (
         "\nPairing code (shown only now; it works until you run 'pair' again):\n\n"
@@ -1132,7 +1148,18 @@ def serve(args: argparse.Namespace, home: Path, ask: Callable[[str], str] | None
         comfy = Comfy(args.comfy_url, log=log)
         python = None
         nodes = Path(args.custom_nodes) if args.custom_nodes else None
-    return run(host, kind, args.port, home, comfy, nodes, python, args.max_upload_mb, log)
+    return run(
+        host,
+        kind,
+        args.port,
+        home,
+        comfy,
+        nodes,
+        python,
+        args.max_upload_mb,
+        log,
+        pairing_code=getattr(args, "pairing_code", None),
+    )
 
 
 def run(
@@ -1146,12 +1173,19 @@ def run(
     max_upload_mb: int = MAX_UPLOAD_MB,
     log: Callable[[str], None] | None = None,
     ready: Callable[[GpuServer], None] | None = None,
+    pairing_code: str | None = None,
 ) -> int:
-    """Serve until Ctrl+C (or ``server.shutdown()`` from ``ready``); stops the ComfyUI it started."""
+    """Serve until Ctrl+C (or ``server.shutdown()`` from ``ready``); stops the ComfyUI it started.
+
+    With ``pairing_code``, that code replaces the saved one; otherwise the saved code is used, or a
+    new one is made when there is none."""
     log = log or Log(home / LOG_FILENAME)
     state = read_state(home)
     fresh = None
-    if not state.get("token_sha256"):
+    if pairing_code:
+        fresh = new_pairing(home, pairing_code)
+        state = read_state(home)
+    elif not state.get("token_sha256"):
         fresh = new_pairing(home)
         state = read_state(home)
     gate = Gate(state["token_sha256"], state_path=home / STATE_FILENAME)

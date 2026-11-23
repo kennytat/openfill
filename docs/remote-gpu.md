@@ -49,6 +49,7 @@ Useful options:
 - `--comfy-url http://127.0.0.1:8188`: use a ComfyUI that already runs on that computer instead of starting one. Then it cannot restart ComfyUI after a node install. Add `--custom-nodes <ComfyUI>\custom_nodes` so it can see and install node packs.
 - `--comfy-arg=--lowvram`: an extra ComfyUI option. Repeat it for more.
 - `gpu_server.py pair`: make a new pairing code. The old one stops working at once, even while the GPU server runs. Use it if the code got out, or when you set up a new editor computer. Add `--port` if the server uses another port, so the line you paste is right.
+- `gpu_server.py serve --pairing-code CODE`: use your own pairing code (16 to 128 letters, digits, `-` or `_`) instead of the saved one. It replaces the saved code, so the old one stops working. The code shows in the computer's process list while the server runs; prefer `pair` on a shared computer.
 - `gpu_server.py addresses`: show the addresses it could listen on.
 
 ## 2. Set up the editor computer

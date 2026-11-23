@@ -423,6 +423,25 @@ class PairingTests(unittest.TestCase):
             self.assertNotEqual(again, token)
             self.assertNotIn(gpu_server.token_digest(token), (home / gpu_server.STATE_FILENAME).read_text())
 
+    def test_a_given_pairing_code_is_adopted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            old = gpu_server.new_pairing(home)
+            self.assertEqual(gpu_server.new_pairing(home, TOKEN), TOKEN)
+            state = gpu_server.read_state(home)
+            self.assertEqual(state["token_sha256"], gpu_server.token_digest(TOKEN))
+            self.assertNotIn(TOKEN, (home / gpu_server.STATE_FILENAME).read_text(encoding="utf-8"))
+            self.assertNotEqual(state["token_sha256"], gpu_server.token_digest(old))
+
+    def test_serve_takes_a_pairing_code(self):
+        parser = gpu_server.build_parser()
+        args = parser.parse_args(["serve", "--comfy-url", "http://127.0.0.1:8188", "--pairing-code", f" {TOKEN} "])
+        self.assertEqual(args.pairing_code, TOKEN)
+        self.assertIsNone(parser.parse_args(["serve", "--comfy-url", "http://127.0.0.1:8188"]).pairing_code)
+        for bad in ("short", "has space in it here", "a@b-0123456789abcdef", "x" * 129):
+            with self.subTest(bad=bad), mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                parser.parse_args(["serve", "--comfy-url", "http://127.0.0.1:8188", "--pairing-code", bad])
+
     def test_the_pairing_line_round_trips(self):
         line = gpu_server.pairing_line(TOKEN, "100.114.250.87", 8390)
         self.assertEqual(line, f"ofgpu://{TOKEN}@100.114.250.87:8390")
@@ -1123,6 +1142,49 @@ class RepairTests(unittest.TestCase):
         try:
             new = gpu_server.new_pairing(home)  # what "gpu_server.py pair" does
             self.assertEqual((code(TOKEN), code(new)), (401, 200))
+        finally:
+            srv.shutdown()
+            t.join(5)
+            fake.stop()
+            tmp.cleanup()
+
+    def test_serve_with_a_pairing_code_uses_it(self):
+        fake = FakeComfy()
+        tmp = tempfile.TemporaryDirectory()
+        home = Path(tmp.name)
+        old = gpu_server.new_pairing(home)
+        given = "given-pairing-code_0123456789"
+        holder = {}
+        ready = threading.Event()
+
+        def on_ready(srv):
+            holder["srv"] = srv
+            ready.set()
+
+        comfy = gpu_server.Comfy(fake.url, log=lambda _t: None)
+        t = threading.Thread(
+            target=gpu_server.run,
+            args=("127.0.0.1", "loopback", 0, home, comfy, None, None),
+            kwargs={"log": lambda _t: None, "ready": on_ready, "pairing_code": given},
+            daemon=True,
+        )
+        with mock.patch("builtins.print"):
+            t.start()
+            ready.wait(5)
+        srv = holder["srv"]
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+
+        def code(token):
+            req = urllib.request.Request(url + "/openfill/ping", headers={"Authorization": f"Bearer {token}"})
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    return r.status
+            except HTTPError as err:
+                err.close()
+                return err.code
+
+        try:
+            self.assertEqual((code(old), code(given)), (401, 200))
         finally:
             srv.shutdown()
             t.join(5)
