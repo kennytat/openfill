@@ -2,6 +2,7 @@
 *.yapf
 *.glade~
 tmp/
+.omc
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
